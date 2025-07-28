@@ -100,21 +100,6 @@ $bgColors = @{
 	L = @(130, 80, 20)
 }
 
-# --- Off‑screen buffer helpers ---------------------------------
-$script:FrameLines      = [string[]]::new([Console]::WindowHeight)
-$script:FrameLineLength = [Console]::WindowWidth
-
-function Clear-BackBuffer {
-    for ($i = 0; $i -lt $script:FrameLines.Length; $i++) {
-        $script:FrameLines[$i] = ' ' * $script:FrameLineLength
-    }
-}
-
-function Present-BackBuffer {
-    [Console]::SetCursorPosition(0,0)
-    [Console]::Write([string]::Join([Environment]::NewLine, $script:FrameLines))
-}
-
 # === CURSOR STATE TRACKING (for perf optimizations) ===
 $script:LastCursorPosition = "-1:-1"
 
