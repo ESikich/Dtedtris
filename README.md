@@ -2,6 +2,10 @@
 *A colorful, fully‑featured Tetris clone written **entirely in PowerShell***
 
 ---
+## 📷 Quick look  
+![DTEDTRIS Screenshot](Dtedtris.png)
+
+---
 
 ## ✨ What makes DTEDTRIS special?
 
@@ -44,11 +48,6 @@
 
 ### Hackable by design  
 Every constant lives in the “**SCRIPT SETTINGS**” block. Change numbers, colours, even the gravity curve – nothing else to touch.
-
----
-
-## 📷 Quick look  
-*(screenshot coming soon)*
 
 ---
 
