@@ -807,7 +807,7 @@ class Tetromino {
 class BitBoard {
     [int] $Width = 10
     [int] $Height = 22
-    [ushort[]] $Rows
+    [System.UInt16[]] $Rows
     [string[,]] $Ids
 
     BitBoard() {
@@ -933,7 +933,11 @@ function Get-GhostPieceFrom([BitBoard]$board, [Tetromino]$active, [string[]]$ids
         if ($rowBits -eq 0) { continue }         # empty stripe row
 
         $yy = $ghost.Y + $i
-        $shifted = ($ghost.X -lt 0) ? ($rowBits -shr -$ghost.X) : ($rowBits -shl $ghost.X)
+        if ($ghost.X -lt 0) {
+            $shifted = $rowBits -shr -$ghost.X
+        } else {
+            $shifted = $rowBits -shl $ghost.X
+        }
 
         # Scan downward until collision using bit masks only
         $d = 0
@@ -1242,7 +1246,7 @@ class GameEngine {
 }
 
 class GameState {
-    [ushort[]] $Rows
+    [System.UInt16[]] $Rows
 	[string[,]]   $Ids
     [Tetromino]  $ActivePiece
     [Tetromino]  $GhostPiece
@@ -1674,4 +1678,3 @@ do {
 	Clear-GameOverScreen
 
 } while ($restart)
-
