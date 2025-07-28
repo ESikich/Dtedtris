@@ -1590,7 +1590,7 @@ cls
 do {
 	$restart = $false
 
-    $app   = [GameApp]::new($BOARD_WIDTH, $BOARD_HEIGHT, $TETROMINO_IDS, $GRAVITY_INTERVALS, $colors, $bgColors)
+    $global:app   = [GameApp]::new($BOARD_WIDTH, $BOARD_HEIGHT, $TETROMINO_IDS, $GRAVITY_INTERVALS, $colors, $bgColors)
     $app.Renderer._PlayfieldFrameDrawn = $false
 	$input = [InputManager]::new($DAS_DELAY_MS, $DAS_INTERVAL_MS)
 	$app.Engine.Spawn()
