@@ -4,51 +4,77 @@ class GameEngine {
     [GameContext]   $Ctx
     [string[]]      $Bag = @()
     [int]           $GravityAccumulator = 0
-    [int]           $MsPerGravity       = $script:GRAVITY_INTERVALS[0]
-    [int]           $LockDelay          = $script:LOCK_DELAY_MS
+    [int]           $MsPerGravity       = 800  # Start at level 0 speed
+    [int]           $LockDelay          = 500  # Default lock delay in ms
     [Nullable[int]] $LockStartedAt      = $null
     [bool]          $LockDelayActive    = $false
     [int]           $LockResets         = 0
-    [int]           $LockResetLimit     = $script:LOCK_RESET_LIMIT
+    [int]           $LockResetLimit     = 2    # Maximum lock resets allowed
     [int]           $LFSR
     [int]           $PrevIndex          = -1
 
-    # ghost cache
+    # Ghost piece caching - avoid recalculating when piece hasn't moved
     [Tetromino]     $GhostCache = $null
     [string]        $GhostKey   = ''
 
-    GameEngine([GameContext]$ctx) {
+    # Configuration dependencies
+    [GameConfig]    $Config
+    [hashtable]     $TetrominoMasks
+    [hashtable]     $TetrominoKicks
+
+    GameEngine([GameContext]$ctx, [GameConfig]$config, [hashtable]$masks, [hashtable]$kicks) {
         $this.Ctx = $ctx
-        $this.LFSR = Get-Random -Minimum 1 -Maximum 128  # Initial seed (non-zero)
+        $this.Config = $config
+        $this.TetrominoMasks = $masks
+        $this.TetrominoKicks = $kicks
+        $this.LFSR = Get-Random -Minimum 1 -Maximum 128  # Ensure non-zero seed for LFSR
+        
+        # Initialize timing values from config
+        $this.LockDelay = $config.LOCK_DELAY_MS
+        $this.LockResetLimit = $config.LOCK_RESET_LIMIT
     }
 
-    [bool] CanPlace([Tetromino]$p) {
-        $id = $p.Id
-        $rot = $p.Rotation % 4
-        $mask = $global:TetrominoMasks[$id][$rot]
-        return $this.Ctx.Board.CanPlaceMask($mask, $p.X, $p.Y)
+    # Backward compatibility constructor that matches original signature
+    GameEngine([GameContext]$ctx) {
+        $this.Ctx = $ctx
+        $this.Config = $Global:GameConfig
+        $this.TetrominoMasks = $global:TetrominoMasks
+        $this.TetrominoKicks = $global:TetrominoKicks
+        $this.LFSR = Get-Random -Minimum 1 -Maximum 128
+        
+        # Initialize timing values from global config
+        $this.LockDelay = $script:LOCK_DELAY_MS
+        $this.LockResetLimit = $script:LOCK_RESET_LIMIT
+    }
+
+    [bool] CanPlace([Tetromino]$piece) {
+        $id = $piece.Id
+        $rot = $piece.Rotation % 4
+        $mask = $this.TetrominoMasks[$id][$rot]
+        return $this.Ctx.Board.CanPlaceMask($mask, $piece.X, $piece.Y)
     }
 
     [bool] IsGrounded() {
         if (-not $this.Ctx.Active) { return $false }
+        # Test if piece would collide one row down
         return -not $this.CanPlace($this.Ctx.Active.CloneMoved(0, 1, 0))
     }
 
     [string] GetNextTetrominoId() {
-        # Step 1: Advance LFSR (7-bit)
+        # NES-style 7-bit LFSR with tap bits at positions 6 and 5
         $bit0 = $this.LFSR -band 1
         $bit1 = ($this.LFSR -shr 1) -band 1
         $newBit = $bit0 -bxor $bit1
         $this.LFSR = ($this.LFSR -shr 1) -bor ($newBit -shl 6)
 
+        # Prevent LFSR from getting stuck at zero
         if ($this.LFSR -eq 0) {
-            $this.LFSR = 0x1F  # reset if stuck (never zero in real LFSR)
+            $this.LFSR = 0x1F
         }
 
-        # Step 2: Get a candidate index
         $index = $this.LFSR % 7
 
-        # NES retry rule: If same as previous, pick again (once)
+        # NES retry rule: if same as previous piece, generate once more
         if ($index -eq $this.PrevIndex) {
             $this.LFSR = ($this.LFSR -shr 1) -bor (($this.LFSR -bxor ($this.LFSR -shr 1)) -shl 6)
             if ($this.LFSR -eq 0) {
@@ -83,42 +109,38 @@ class GameEngine {
         )
     }
 
-    [GameState] Update([int]$dt) {
+    [GameState] Update([int]$deltaTime) {
         if ($this.Ctx.GameOver) { return $null }
 
-        $changed = $false
-        $this.GravityAccumulator += $dt
-        $this.MsPerGravity = $this.Ctx.GravityIntervals[
-            [math]::Min($this.Ctx.Level, $this.Ctx.GravityIntervals.Count - 1)
-        ]
+        $stateChanged = $false
+        $this.GravityAccumulator += $deltaTime
+        
+        # Update gravity speed based on current level
+        $levelIndex = [math]::Min($this.Ctx.Level, $this.Ctx.GravityIntervals.Count - 1)
+        $this.MsPerGravity = $this.Ctx.GravityIntervals[$levelIndex]
 
         if ($this.GravityAccumulator -ge $this.MsPerGravity) {
             $this.GravityAccumulator -= $this.MsPerGravity
 
             if ($this.TryMove(0, 1, 0)) {
-                $this.LockDelayActive = $false
-                $this.LockResets      = 0
-                $this.LockStartedAt   = $null
-                $changed = $true
+                # Piece fell successfully - reset lock delay
+                $this.ResetLockDelay()
+                $stateChanged = $true
             } else {
+                # Piece hit something - start or check lock delay
                 $now = [Environment]::TickCount
 
                 if (-not $this.LockDelayActive) {
-                    $this.LockDelayActive = $true
-                    $this.LockStartedAt   = $now
-                    $changed = $true
-                } elseif (($null -ne $this.LockStartedAt) -and ($now - $this.LockStartedAt) -ge $this.LockDelay) {
+                    $this.StartLockDelay($now)
+                    $stateChanged = $true
+                } elseif ($this.IsLockDelayExpired($now)) {
                     $this.ForceLock()
-                    $changed = $true
+                    $stateChanged = $true
                 }
             }
         }
 
-        if ($changed) {
-            return $this.TakeSnapshot()
-        }
-
-        return $null
+        return $stateChanged ? $this.TakeSnapshot() : $null
     }
 
     [bool] TryMove([int]$dx, [int]$dy, [int]$dr) {
@@ -127,10 +149,9 @@ class GameEngine {
 
         $this.Ctx.Active = $next
 
+        # Reset lock delay if piece can still move down and we haven't exceeded reset limit
         if ($this.LockDelayActive -and $this.IsGrounded() -and
             $this.LockResets -lt $this.LockResetLimit) {
-
-            # Cache time
             $this.LockStartedAt = [Environment]::TickCount
             $this.LockResets++
         }
@@ -138,25 +159,27 @@ class GameEngine {
         return $true
     }
 
-    [bool] TryRotateWithWallKick([Tetromino]$piece, [int]$dir) {
-        $old = $piece.Rotation % 4
-        $new = ($old + $dir) % 4
-        $key = "${old}_${new}"
+    [bool] TryRotateWithWallKick([Tetromino]$piece, [int]$direction) {
+        $oldRotation = $piece.Rotation % 4
+        $newRotation = ($oldRotation + $direction) % 4
+        $kickKey = "${oldRotation}_${newRotation}"
 
-        $table = if ($piece.Id -eq 'I') {
-            $global:TetrominoKicks.I[$key]
+        # I-piece has different wall kick data than other pieces
+        $kickTable = if ($piece.Id -eq 'I') {
+            $this.TetrominoKicks.I[$kickKey]
         } else {
-            $global:TetrominoKicks.Default[$key]
+            $this.TetrominoKicks.Default[$kickKey]
         }
 
-        foreach ($kick in $table) {
-            $test = $piece.CloneMoved($kick.X, $kick.Y, $dir)
-            if ($this.CanPlace($test)) {
-                $this.Ctx.Active = $test
+        # Try each wall kick offset in sequence
+        foreach ($kick in $kickTable) {
+            $testPiece = $piece.CloneMoved($kick.X, $kick.Y, $direction)
+            if ($this.CanPlace($testPiece)) {
+                $this.Ctx.Active = $testPiece
 
+                # Reset lock delay for successful rotation
                 if ($this.LockDelayActive -and $this.IsGrounded() -and
                     $this.LockResets -lt $this.LockResetLimit) {
-
                     $this.LockStartedAt = [Environment]::TickCount
                     $this.LockResets++
                 }
@@ -169,6 +192,7 @@ class GameEngine {
     }
 
     [void] Spawn() {
+        # Ensure we have a next piece queued
         if (-not $this.Ctx.NextQueue) {
             $this.Ctx.NextQueue = @($this.GetNextTetrominoId())
         }
@@ -176,28 +200,31 @@ class GameEngine {
         $id = $this.Ctx.NextQueue[0]
         $this.Ctx.NextQueue = ,($this.GetNextTetrominoId())
 
-        # Increment piece count
+        # Track piece statistics
         if (-not $this.Ctx.PieceCounts.ContainsKey($id)) {
             $this.Ctx.PieceCounts[$id] = 0
         }
         $this.Ctx.PieceCounts[$id]++
 
-        # --- X centering (precomputed) ---
-        $dim = $global:TetrominoDims[$id]
-        $x   = [math]::Floor(($this.Ctx.Width - $dim.Width) / 2) - $dim.MinX
+        # Center piece horizontally using precomputed dimensions
+        $dimensions = $this.Config.TetrominoDims[$id]
+        $centerX = [math]::Floor(($this.Ctx.Width - $dimensions.Width) / 2) - $dimensions.MinX
 
         $this.Ctx.Active = [Tetromino]::new(
             $id,
-            $x,
-            $script:SPAWN_Y_OFFSET,
-            $global:TetrominoKicks
+            $centerX,
+            $this.Config.SPAWN_Y_OFFSET,
+            $this.TetrominoKicks
         )
 
+        # Test for game over conditions
         if (-not $this.CanPlace($this.Ctx.Active)) {
             $this.Ctx.GameOver = $true
         } elseif ($this.TryMove(0, 1, 0)) {
+            # Piece can fall, move it back up to proper spawn position
             $null = $this.TryMove(0, -1, 0)
         } else {
+            # Piece can't fall from spawn - game over
             $this.Ctx.GameOver = $true
         }
     }
@@ -207,45 +234,73 @@ class GameEngine {
 
         $id = $this.Ctx.Active.Id
         $rot = $this.Ctx.Active.Rotation % 4
-        $mask = $global:TetrominoMasks[$id][$rot]
+        $mask = $this.TetrominoMasks[$id][$rot]
 
         $this.Ctx.Board.PlaceMask($mask, $this.Ctx.Active.X, $this.Ctx.Active.Y, $id)
 
-        # Step 1: Detect full lines
+        # Handle line clearing with visual feedback
         $fullLines = $this.Ctx.Board.GetFullLines()
-
-        # Step 2: Flash them if any
-        if ($fullLines.Count -gt 0 -and $script:app -and $script:app.Renderer) {
-            $script:app.Renderer.FlashLines($fullLines, 4, 32)  # X flickers, Y ms
+        if ($fullLines.Count -gt 0) {
+            $this.FlashFullLines($fullLines)
         }
 
-        # Step 3: Clear them and apply scoring
-        $cleared = $this.Ctx.Board.ClearLines()
-        if ($cleared -gt 0) {
-            $this.Ctx.Lines += $cleared
-            $this.Ctx.Level = [math]::Floor($this.Ctx.Lines / $script:LINES_PER_LEVEL)
-            $this.Ctx.Score += $script:LINE_CLEAR_SCORES[$cleared] * ($this.Ctx.Level + 1)
+        $linesCleared = $this.Ctx.Board.ClearLines()
+        if ($linesCleared -gt 0) {
+            $this.UpdateScoreAndLevel($linesCleared)
         }
 
         $this.Spawn()
+        $this.ResetLockDelay()
+    }
+
+    # Private helper methods for lock delay management
+    [void] StartLockDelay([int]$currentTime) {
+        $this.LockDelayActive = $true
+        $this.LockStartedAt = $currentTime
+    }
+
+    [void] ResetLockDelay() {
         $this.LockDelayActive = $false
-        $this.LockStartedAt   = $null
-        $this.LockResets      = 0
+        $this.LockStartedAt = $null
+        $this.LockResets = 0
+    }
+
+    [bool] IsLockDelayExpired([int]$currentTime) {
+        return ($null -ne $this.LockStartedAt) -and 
+               ($currentTime - $this.LockStartedAt) -ge $this.LockDelay
+    }
+
+    [void] FlashFullLines([int[]]$lineIndices) {
+        # Only flash if we have a renderer available
+        if ($script:app -and $script:app.Renderer) {
+            $script:app.Renderer.FlashLines($lineIndices, 4, 32)
+        }
+    }
+
+    [void] UpdateScoreAndLevel([int]$linesCleared) {
+        $this.Ctx.Lines += $linesCleared
+        $this.Ctx.Level = [math]::Floor($this.Ctx.Lines / $this.Config.LINES_PER_LEVEL)
+        
+        # Apply scoring formula: base score × (level + 1)
+        $baseScore = $this.Config.LINE_CLEAR_SCORES[$linesCleared]
+        $this.Ctx.Score += $baseScore * ($this.Ctx.Level + 1)
     }
 
     [string] MakeGhostKey([Tetromino]$piece) {
+        # Create cache key from piece position and rotation
         return "{0}:{1}:{2}:{3}" -f $piece.Id, $piece.X, $piece.Y, ($piece.Rotation % 4)
     }
 
     [Tetromino] GetGhostCached() {
         $active = $this.Ctx.Active
-        #if (-not $active) { return $null }
+        if (-not $active) { return $null }
 
         $newKey = $this.MakeGhostKey($active)
 
+        # Only recalculate ghost if piece has moved
         if ($this.GhostKey -ne $newKey) {
             $this.GhostCache = Get-GhostPieceFrom -board $this.Ctx.Board -active $active -ids $this.Ctx.Ids
-            $this.GhostKey   = $newKey
+            $this.GhostKey = $newKey
         }
 
         return $this.GhostCache

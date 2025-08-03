@@ -1,5 +1,6 @@
 # === TETROMINO CLASS ===
 
+. "$PSScriptRoot\Point.ps1"
 class Tetromino {
     [string]   $Id
     [int]      $Rotation = 0
