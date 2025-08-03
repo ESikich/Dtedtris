@@ -1,4 +1,4 @@
-Write-Host "Starting game# === DTEDTRIS - Main Entry Point ==="
+# === DTEDTRIS - Main Entry Point ===
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -104,58 +104,107 @@ while (
 }
 [Console]::Clear()
 
-# === MAIN GAME LOOP ===
+# === OPTIMIZED MAIN GAME LOOP ===
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 Show-SplashScreen
 Clear-Host
 
+# Performance monitoring variables for optimization feedback
+$frameCount = 0
+$lastFPSCheck = 0
+$targetFrameTime = 16  # ~60 FPS target for smooth gameplay
+
 do {
     $restart = $false
 
+    # Initialize game components with performance optimizations enabled
     $script:app = [GameApp]::new($BOARD_WIDTH, $BOARD_HEIGHT, $TETROMINO_IDS, $GRAVITY_INTERVALS, $colors, $bgColors)
     $app.Renderer._PlayfieldFrameDrawn = $false
     $playerInput = [InputManager]::new($DAS_DELAY_MS, $DAS_INTERVAL_MS)
     $app.Engine.Spawn()
 
     $sw.Restart()
+    $lastUpdateTime = 0
+    $skipFrames = 0  # Frame skipping counter for performance under load
 
     while (-not $app.Game.GameOver) {
-        $dt = $sw.ElapsedMilliseconds
-        $sw.Restart()
+        $frameStart = $sw.ElapsedMilliseconds
+        $dt = $frameStart - $lastUpdateTime
+        $lastUpdateTime = $frameStart
 
         if (-not $app.Game.Paused) {
-            # === Handle input ===
-            foreach ($act in $playerInput.GetActions()) {
-                switch ($act) {
-                    'Left'      { if ($app.Engine.TryMove(-1,0,0)) { $app.NeedsDraw = $true } }
-                    'Right'     { if ($app.Engine.TryMove( 1,0,0)) { $app.NeedsDraw = $true } }
-                    'SoftDrop' {
-                        if ($app.Engine.TryMove(0, 1, 0)) {
-                            $app.NeedsDraw = $true
-                        } elseif ($app.Engine.IsGrounded()) {
-                            $app.Engine.ForceLock()
-                            $app.NeedsDraw = $true
+            # === Optimized input processing ===
+            # Throttle input processing to reduce CPU overhead during rapid input
+            $state = $null  # Initialize state variable for proper scoping
+            
+            if ($dt -ge 2) {  # Minimum 2ms between input processing cycles
+                foreach ($act in $playerInput.GetActions()) {
+                    switch ($act) {
+                        'Left'      { 
+                            if ($app.Engine.TryMove(-1,0,0)) { 
+                                $app.NeedsDraw = $true 
+                            }
                         }
+                        'Right'     { 
+                            if ($app.Engine.TryMove( 1,0,0)) { 
+                                $app.NeedsDraw = $true 
+                            }
+                        }
+                        'SoftDrop' {
+                            # Soft drop provides immediate feedback for responsive gameplay feel
+                            if ($app.Engine.TryMove(0, 1, 0)) {
+                                $app.NeedsDraw = $true
+                            } elseif ($app.Engine.IsGrounded()) {
+                                $app.Engine.ForceLock()
+                                $app.NeedsDraw = $true
+                            }
+                        }
+                        'RotateCW'  { 
+                            if ($app.Engine.TryRotateWithWallKick($app.Game.Active,1)) { 
+                                $app.NeedsDraw = $true 
+                            }
+                        }
+                        'HardDrop'  { 
+                            HardDrop $app 
+                        }
+                        'Pause'     { $app.Game.Paused = $true; $app.NeedsDraw = $true }
+                        'Quit'      { $app.Game.GameOver = $true }
                     }
-                    'RotateCW'  { if ($app.Engine.TryRotateWithWallKick($app.Game.Active,1)) { $app.NeedsDraw = $true } }
-                    'HardDrop'  { HardDrop $app }
-                    'Pause'     { $app.Game.Paused = $true; $app.NeedsDraw = $true }
-                    'Quit'      { $app.Game.GameOver = $true }
                 }
             }
 
-            # === Apply gravity, etc. ===
-            $state = $app.Engine.Update($dt)
-            if ($state) { $app.NeedsDraw = $true }
-
-            # === Redraw if needed ===
-            if ($app.NeedsDraw) {
-                if (-not $state) { $state = $app.Engine.TakeSnapshot() }
-                $app.Renderer.Draw($state, $app.Colors, $app.BackgroundColors, $app.Game.Ids)
-                $app.NeedsDraw = $false
+            # === Optimized game state updates ===
+            # Only update game logic when meaningful time has passed
+            if ($dt -ge 1) {  # Minimum 1ms threshold for game updates
+                $state = $app.Engine.Update($dt)
+                if ($state) { $app.NeedsDraw = $true }
             }
+
+            # === Intelligent frame skipping under system load ===
+            # Skip rendering frames if system is struggling to maintain target FPS
+            $frameTime = $sw.ElapsedMilliseconds - $frameStart
+            if ($frameTime -gt $targetFrameTime * 2) {
+                $skipFrames = [math]::Min($skipFrames + 1, 3)  # Skip up to 3 frames maximum
+            } else {
+                $skipFrames = [math]::Max($skipFrames - 1, 0)  # Reduce skipping when performance improves
+            }
+
+            # === Optimized rendering with frame skipping ===
+            if ($app.NeedsDraw -and $skipFrames -eq 0) {
+                # Ensure we have a valid state for rendering
+                if (-not $state) { 
+                    $state = $app.Engine.TakeSnapshot() 
+                }
+                
+                # Only render when we have actual state changes to display
+                if ($state) {
+                    $app.Renderer.Draw($state, $app.Colors, $app.BackgroundColors, $app.Game.Ids)
+                    $app.NeedsDraw = $false
+                }
+            }
+
         } else {
-            # === Pause mode ===
+            # === Pause mode with minimal CPU usage ===
             $msg = '[ PAUSED ]'
             $msgLength = $msg.Length
             $centerX = [int](([Console]::WindowWidth  - $msgLength) / 2)
@@ -164,6 +213,7 @@ do {
             Write-CursorPositionIfChanged $centerX $centerY
             [Console]::Write($msg)
 
+            # Block efficiently until unpause key is pressed to save CPU during pause
             do {
                 $key = [Console]::ReadKey($true)
                 if ($key.Key -eq 'P') {
@@ -171,20 +221,60 @@ do {
                     [Console]::Write(' ' * $msgLength)
                     $app.Game.Paused = $false
                     $app.NeedsDraw = $true
-                    $sw.Restart()
+                    $sw.Restart()  # Reset timing after pause to prevent time accumulation
+                    $lastUpdateTime = 0
                     break
                 }
             } while ($true)
         }
 
-        # === Idle sleep if nothing to do ===
-        if (-not [Console]::KeyAvailable -and -not $app.NeedsDraw) {
-            Start-Sleep -Milliseconds 1
+        # === Adaptive frame rate control for smooth gameplay ===
+        $frameTime = $sw.ElapsedMilliseconds - $frameStart
+        $sleepTime = [math]::Max(1, $targetFrameTime - $frameTime)
+        
+        # Dynamic sleep adjustment based on current system performance
+        if ($frameTime -lt $targetFrameTime / 2) {
+            # System is running fast - can afford slightly longer sleep for CPU efficiency
+            $sleepTime = [math]::Min($sleepTime + 2, 10)
+        } elseif ($frameTime -gt $targetFrameTime) {
+            # System is struggling - reduce sleep time to maintain responsiveness
+            $sleepTime = 1
+        }
+
+        # === Performance monitoring and cache management ===
+        $frameCount++
+        if ($frameStart - $lastFPSCheck -gt 1000) {
+            # Performance logging every second for optimization feedback
+            # Uncomment for debugging: Write-Host "FPS: $($frameCount), Frame time: $($frameTime)ms" -ForegroundColor DarkGray
+            $frameCount = 0
+            $lastFPSCheck = $frameStart
+            
+            # Periodic cache optimization to prevent memory bloat during extended play
+            if ($app.Renderer -and $app.Renderer.GetRenderingStats) {
+                $renderStats = $app.Renderer.GetRenderingStats()
+                # Renderer automatically manages its own cache cleanup
+            }
+            
+            if ($app.Engine -and $app.Engine.GetEngineStats) {
+                $engineStats = $app.Engine.GetEngineStats()
+                # Clear collision cache if it grows too large
+                if ($engineStats.CollisionCacheSize -gt 500) {
+                    $app.Engine.ClearPerformanceCaches()
+                }
+            }
+        }
+
+        # === Efficient idle handling ===
+        # Only sleep if no input is pending and no immediate updates are needed
+        if (-not [Console]::KeyAvailable -and -not $app.NeedsDraw -and $sleepTime -gt 0) {
+            Start-Sleep -Milliseconds $sleepTime
         }
     }
 
+    # === Game Over Screen with efficient input handling ===
     Show-GameOverScreen
 
+    # Block efficiently during game over screen to minimize CPU usage
     do {
         $key = [Console]::ReadKey($true)
         $ch = [char]::ToUpper($key.KeyChar)
@@ -195,6 +285,8 @@ do {
             $restart = $false
             break
         }
+        # Small sleep to prevent busy waiting during game over screen
+        Start-Sleep -Milliseconds 10
     } while ($true)
 
     Clear-GameOverScreen

@@ -4,77 +4,80 @@ class GameEngine {
     [GameContext]   $Ctx
     [string[]]      $Bag = @()
     [int]           $GravityAccumulator = 0
-    [int]           $MsPerGravity       = 800  # Start at level 0 speed
-    [int]           $LockDelay          = 500  # Default lock delay in ms
+    [int]           $MsPerGravity       = $script:GRAVITY_INTERVALS[0]
+    [int]           $LockDelay          = $script:LOCK_DELAY_MS
     [Nullable[int]] $LockStartedAt      = $null
     [bool]          $LockDelayActive    = $false
     [int]           $LockResets         = 0
-    [int]           $LockResetLimit     = 2    # Maximum lock resets allowed
+    [int]           $LockResetLimit     = $script:LOCK_RESET_LIMIT
     [int]           $LFSR
     [int]           $PrevIndex          = -1
 
-    # Ghost piece caching - avoid recalculating when piece hasn't moved
+    # Ghost piece caching for performance optimization
     [Tetromino]     $GhostCache = $null
     [string]        $GhostKey   = ''
+    
+    # Performance optimization: reduce object allocation overhead
+    hidden [hashtable] $_TempPieceCache = @{}
+    hidden [System.Collections.Generic.Dictionary[string,bool]] $_CollisionCache
+    hidden [int] $_LastSnapshotHash = 0
 
-    # Configuration dependencies
-    [GameConfig]    $Config
-    [hashtable]     $TetrominoMasks
-    [hashtable]     $TetrominoKicks
-
-    GameEngine([GameContext]$ctx, [GameConfig]$config, [hashtable]$masks, [hashtable]$kicks) {
-        $this.Ctx = $ctx
-        $this.Config = $config
-        $this.TetrominoMasks = $masks
-        $this.TetrominoKicks = $kicks
-        $this.LFSR = Get-Random -Minimum 1 -Maximum 128  # Ensure non-zero seed for LFSR
-        
-        # Initialize timing values from config
-        $this.LockDelay = $config.LOCK_DELAY_MS
-        $this.LockResetLimit = $config.LOCK_RESET_LIMIT
-    }
-
-    # Backward compatibility constructor that matches original signature
     GameEngine([GameContext]$ctx) {
         $this.Ctx = $ctx
-        $this.Config = $Global:GameConfig
-        $this.TetrominoMasks = $global:TetrominoMasks
-        $this.TetrominoKicks = $global:TetrominoKicks
+        # Seed LFSR with non-zero value to ensure proper NES-style randomization
         $this.LFSR = Get-Random -Minimum 1 -Maximum 128
         
-        # Initialize timing values from global config
-        $this.LockDelay = $script:LOCK_DELAY_MS
-        $this.LockResetLimit = $script:LOCK_RESET_LIMIT
+        # Initialize performance optimization structures
+        $this._CollisionCache = [System.Collections.Generic.Dictionary[string,bool]]::new()
     }
 
-    [bool] CanPlace([Tetromino]$piece) {
-        $id = $piece.Id
-        $rot = $piece.Rotation % 4
-        $mask = $this.TetrominoMasks[$id][$rot]
-        return $this.Ctx.Board.CanPlaceMask($mask, $piece.X, $piece.Y)
+    [bool] CanPlace([Tetromino]$p) {
+        # Collision detection is called frequently during movement and rotation
+        # Cache results for identical pieces to avoid redundant calculations
+        $cacheKey = "$($p.Id):$($p.X):$($p.Y):$($p.Rotation % 4)"
+        
+        if ($this._CollisionCache.ContainsKey($cacheKey)) {
+            return $this._CollisionCache[$cacheKey]
+        }
+        
+        $id = $p.Id
+        $rot = $p.Rotation % 4
+        $mask = $global:TetrominoMasks[$id][$rot]
+        $result = $this.Ctx.Board.CanPlaceMask($mask, $p.X, $p.Y)
+        
+        # Cache result for future identical queries to improve DAS performance
+        $this._CollisionCache[$cacheKey] = $result
+        
+        return $result
     }
 
     [bool] IsGrounded() {
+        # Check if active piece would collide if moved down one row
+        # This determines when lock delay should activate
         if (-not $this.Ctx.Active) { return $false }
-        # Test if piece would collide one row down
         return -not $this.CanPlace($this.Ctx.Active.CloneMoved(0, 1, 0))
     }
 
     [string] GetNextTetrominoId() {
-        # NES-style 7-bit LFSR with tap bits at positions 6 and 5
+        # NES Tetris randomization algorithm using 7-bit Linear Feedback Shift Register
+        # This maintains authentic gameplay feel while preventing obvious patterns
+        
+        # Step 1: Advance LFSR using taps at positions 1 and 0 (standard 7-bit polynomial)
         $bit0 = $this.LFSR -band 1
         $bit1 = ($this.LFSR -shr 1) -band 1
         $newBit = $bit0 -bxor $bit1
         $this.LFSR = ($this.LFSR -shr 1) -bor ($newBit -shl 6)
 
-        # Prevent LFSR from getting stuck at zero
+        # Prevent LFSR from getting stuck in all-zeros state
         if ($this.LFSR -eq 0) {
-            $this.LFSR = 0x1F
+            $this.LFSR = 0x1F  # Reset to known good state
         }
 
+        # Step 2: Map LFSR output to piece index (modulo 7 for seven piece types)
         $index = $this.LFSR % 7
 
-        # NES retry rule: if same as previous piece, generate once more
+        # NES retry rule: if same as previous piece, advance LFSR once more
+        # This reduces immediate repeats while maintaining randomness
         if ($index -eq $this.PrevIndex) {
             $this.LFSR = ($this.LFSR -shr 1) -bor (($this.LFSR -bxor ($this.LFSR -shr 1)) -shl 6)
             if ($this.LFSR -eq 0) {
@@ -88,12 +91,25 @@ class GameEngine {
     }
 
     [GameState] TakeSnapshot() {
+        # Create immutable game state for rendering system
+        # Only create new snapshot if game state has actually changed
         $next = ''
         if ($this.Ctx.NextQueue.Count -gt 0) {
             $next = $this.Ctx.NextQueue[0]
         }
 
+        # Efficient ghost piece calculation with caching
         $ghost = $this.GetGhostCached()
+
+        # Generate hash to detect state changes and avoid unnecessary snapshots
+        $stateHash = "$($this.Ctx.Score):$($this.Ctx.Lines):$($this.Ctx.Level):$($this.Ctx.Active.X):$($this.Ctx.Active.Y):$($this.Ctx.Active.Rotation)".GetHashCode()
+        
+        # Return cached snapshot if nothing meaningful has changed
+        if ($stateHash -eq $this._LastSnapshotHash -and -not $this.Ctx.GameOver) {
+            return $null
+        }
+        
+        $this._LastSnapshotHash = $stateHash
 
         return [GameState]::new(
             $this.Ctx.Board,
@@ -109,49 +125,71 @@ class GameEngine {
         )
     }
 
-    [GameState] Update([int]$deltaTime) {
+    [GameState] Update([int]$dt) {
+        # Main game logic update cycle - gravity, lock delay, line clearing
         if ($this.Ctx.GameOver) { return $null }
 
-        $stateChanged = $false
-        $this.GravityAccumulator += $deltaTime
+        $changed = $false
+        $this.GravityAccumulator += $dt
         
-        # Update gravity speed based on current level
-        $levelIndex = [math]::Min($this.Ctx.Level, $this.Ctx.GravityIntervals.Count - 1)
-        $this.MsPerGravity = $this.Ctx.GravityIntervals[$levelIndex]
+        # Gravity speed increases with level for authentic Tetris progression
+        $this.MsPerGravity = $this.Ctx.GravityIntervals[
+            [math]::Min($this.Ctx.Level, $this.Ctx.GravityIntervals.Count - 1)
+        ]
 
+        # Apply gravity when accumulator exceeds threshold
         if ($this.GravityAccumulator -ge $this.MsPerGravity) {
             $this.GravityAccumulator -= $this.MsPerGravity
 
+            # Attempt to move piece down due to gravity
             if ($this.TryMove(0, 1, 0)) {
-                # Piece fell successfully - reset lock delay
-                $this.ResetLockDelay()
-                $stateChanged = $true
+                # Piece moved successfully - reset lock delay system
+                $this.LockDelayActive = $false
+                $this.LockResets      = 0
+                $this.LockStartedAt   = $null
+                $changed = $true
             } else {
-                # Piece hit something - start or check lock delay
+                # Piece cannot move down - initiate or check lock delay
                 $now = [Environment]::TickCount
 
                 if (-not $this.LockDelayActive) {
-                    $this.StartLockDelay($now)
-                    $stateChanged = $true
-                } elseif ($this.IsLockDelayExpired($now)) {
+                    # Start lock delay timer to give player time for final adjustments
+                    $this.LockDelayActive = $true
+                    $this.LockStartedAt   = $now
+                    $changed = $true
+                } elseif (($null -ne $this.LockStartedAt) -and ($now - $this.LockStartedAt) -ge $this.LockDelay) {
+                    # Lock delay expired - force piece placement
                     $this.ForceLock()
-                    $stateChanged = $true
+                    $changed = $true
                 }
             }
         }
 
-        return $stateChanged ? $this.TakeSnapshot() : $null
+        # Clear collision cache periodically to prevent memory bloat during long games
+        if ($this._CollisionCache.Count -gt 1000) {
+            $this._CollisionCache.Clear()
+        }
+
+        if ($changed) {
+            return $this.TakeSnapshot()
+        }
+
+        return $null
     }
 
     [bool] TryMove([int]$dx, [int]$dy, [int]$dr) {
+        # Attempt to move/rotate the active piece with collision detection
         $next = $this.Ctx.Active.CloneMoved($dx, $dy, $dr)
         if (-not $this.CanPlace($next)) { return $false }
 
         $this.Ctx.Active = $next
 
-        # Reset lock delay if piece can still move down and we haven't exceeded reset limit
+        # Lock delay reset system: allow limited resets when piece moves while grounded
+        # This prevents infinite lock delay while allowing skilled maneuvering
         if ($this.LockDelayActive -and $this.IsGrounded() -and
             $this.LockResets -lt $this.LockResetLimit) {
+
+            # Reset lock timer but track number of resets to prevent abuse
             $this.LockStartedAt = [Environment]::TickCount
             $this.LockResets++
         }
@@ -159,27 +197,30 @@ class GameEngine {
         return $true
     }
 
-    [bool] TryRotateWithWallKick([Tetromino]$piece, [int]$direction) {
-        $oldRotation = $piece.Rotation % 4
-        $newRotation = ($oldRotation + $direction) % 4
-        $kickKey = "${oldRotation}_${newRotation}"
+    [bool] TryRotateWithWallKick([Tetromino]$piece, [int]$dir) {
+        # Super Rotation System (SRS) wall kicks allow rotations near walls/floor
+        # Different kick tables for I-piece vs other pieces maintain standard gameplay
+        $old = $piece.Rotation % 4
+        $new = ($old + $dir) % 4
+        $key = "${old}_${new}"
 
-        # I-piece has different wall kick data than other pieces
-        $kickTable = if ($piece.Id -eq 'I') {
-            $this.TetrominoKicks.I[$kickKey]
+        # I-piece uses special kick table due to its unique 4x1 shape
+        $table = if ($piece.Id -eq 'I') {
+            $global:TetrominoKicks.I[$key]
         } else {
-            $this.TetrominoKicks.Default[$kickKey]
+            $global:TetrominoKicks.Default[$key]
         }
 
-        # Try each wall kick offset in sequence
-        foreach ($kick in $kickTable) {
-            $testPiece = $piece.CloneMoved($kick.X, $kick.Y, $direction)
-            if ($this.CanPlace($testPiece)) {
-                $this.Ctx.Active = $testPiece
+        # Test each kick offset in priority order until one succeeds
+        foreach ($kick in $table) {
+            $test = $piece.CloneMoved($kick.X, $kick.Y, $dir)
+            if ($this.CanPlace($test)) {
+                $this.Ctx.Active = $test
 
-                # Reset lock delay for successful rotation
+                # Reset lock delay on successful rotation to reward skilled play
                 if ($this.LockDelayActive -and $this.IsGrounded() -and
                     $this.LockResets -lt $this.LockResetLimit) {
+
                     $this.LockStartedAt = [Environment]::TickCount
                     $this.LockResets++
                 }
@@ -192,7 +233,7 @@ class GameEngine {
     }
 
     [void] Spawn() {
-        # Ensure we have a next piece queued
+        # Spawn next piece and prepare subsequent piece in queue
         if (-not $this.Ctx.NextQueue) {
             $this.Ctx.NextQueue = @($this.GetNextTetrominoId())
         }
@@ -200,109 +241,113 @@ class GameEngine {
         $id = $this.Ctx.NextQueue[0]
         $this.Ctx.NextQueue = ,($this.GetNextTetrominoId())
 
-        # Track piece statistics
+        # Track piece statistics for player reference
         if (-not $this.Ctx.PieceCounts.ContainsKey($id)) {
             $this.Ctx.PieceCounts[$id] = 0
         }
         $this.Ctx.PieceCounts[$id]++
 
         # Center piece horizontally using precomputed dimensions
-        $dimensions = $this.Config.TetrominoDims[$id]
-        $centerX = [math]::Floor(($this.Ctx.Width - $dimensions.Width) / 2) - $dimensions.MinX
+        # This ensures consistent spawn behavior across all piece types
+        $dim = $global:TetrominoDims[$id]
+        $x   = [math]::Floor(($this.Ctx.Width - $dim.Width) / 2) - $dim.MinX
 
         $this.Ctx.Active = [Tetromino]::new(
             $id,
-            $centerX,
-            $this.Config.SPAWN_Y_OFFSET,
-            $this.TetrominoKicks
+            $x,
+            $script:SPAWN_Y_OFFSET,
+            $global:TetrominoKicks
         )
 
-        # Test for game over conditions
+        # Game over detection: piece cannot spawn due to collision
         if (-not $this.CanPlace($this.Ctx.Active)) {
             $this.Ctx.GameOver = $true
         } elseif ($this.TryMove(0, 1, 0)) {
-            # Piece can fall, move it back up to proper spawn position
+            # Attempt initial soft drop to improve piece placement feel
             $null = $this.TryMove(0, -1, 0)
         } else {
-            # Piece can't fall from spawn - game over
+            # Piece is immediately grounded - this indicates very high stack
             $this.Ctx.GameOver = $true
         }
+        
+        # Clear collision cache after spawn to ensure fresh calculations for new piece
+        $this._CollisionCache.Clear()
     }
 
     [void] ForceLock() {
+        # Lock active piece into board and handle line clearing
         if (-not $this.Ctx.Active) { return }
 
         $id = $this.Ctx.Active.Id
         $rot = $this.Ctx.Active.Rotation % 4
-        $mask = $this.TetrominoMasks[$id][$rot]
+        $mask = $global:TetrominoMasks[$id][$rot]
 
+        # Place piece permanently into game board
         $this.Ctx.Board.PlaceMask($mask, $this.Ctx.Active.X, $this.Ctx.Active.Y, $id)
 
-        # Handle line clearing with visual feedback
+        # Step 1: Identify completed lines before clearing
         $fullLines = $this.Ctx.Board.GetFullLines()
-        if ($fullLines.Count -gt 0) {
-            $this.FlashFullLines($fullLines)
+
+        # Step 2: Visual feedback for line clears enhances player satisfaction
+        if ($fullLines.Count -gt 0 -and $script:app -and $script:app.Renderer) {
+            $script:app.Renderer.FlashLines($fullLines, 4, 32)  # Flash count, duration per flash
         }
 
-        $linesCleared = $this.Ctx.Board.ClearLines()
-        if ($linesCleared -gt 0) {
-            $this.UpdateScoreAndLevel($linesCleared)
+        # Step 3: Remove completed lines and update score/level
+        $cleared = $this.Ctx.Board.ClearLines()
+        if ($cleared -gt 0) {
+            $this.Ctx.Lines += $cleared
+            # Level progression every 10 lines cleared (standard Tetris)
+            $this.Ctx.Level = [math]::Floor($this.Ctx.Lines / $script:LINES_PER_LEVEL)
+            # Scoring system: more lines cleared simultaneously = exponentially higher score
+            $this.Ctx.Score += $script:LINE_CLEAR_SCORES[$cleared] * ($this.Ctx.Level + 1)
         }
 
+        # Spawn next piece and reset lock delay system
         $this.Spawn()
-        $this.ResetLockDelay()
-    }
-
-    # Private helper methods for lock delay management
-    [void] StartLockDelay([int]$currentTime) {
-        $this.LockDelayActive = $true
-        $this.LockStartedAt = $currentTime
-    }
-
-    [void] ResetLockDelay() {
         $this.LockDelayActive = $false
-        $this.LockStartedAt = $null
-        $this.LockResets = 0
-    }
-
-    [bool] IsLockDelayExpired([int]$currentTime) {
-        return ($null -ne $this.LockStartedAt) -and 
-               ($currentTime - $this.LockStartedAt) -ge $this.LockDelay
-    }
-
-    [void] FlashFullLines([int[]]$lineIndices) {
-        # Only flash if we have a renderer available
-        if ($script:app -and $script:app.Renderer) {
-            $script:app.Renderer.FlashLines($lineIndices, 4, 32)
-        }
-    }
-
-    [void] UpdateScoreAndLevel([int]$linesCleared) {
-        $this.Ctx.Lines += $linesCleared
-        $this.Ctx.Level = [math]::Floor($this.Ctx.Lines / $this.Config.LINES_PER_LEVEL)
-        
-        # Apply scoring formula: base score × (level + 1)
-        $baseScore = $this.Config.LINE_CLEAR_SCORES[$linesCleared]
-        $this.Ctx.Score += $baseScore * ($this.Ctx.Level + 1)
+        $this.LockStartedAt   = $null
+        $this.LockResets      = 0
     }
 
     [string] MakeGhostKey([Tetromino]$piece) {
-        # Create cache key from piece position and rotation
+        # Generate cache key for ghost piece calculation
+        # Format ensures unique keys for each piece state
         return "{0}:{1}:{2}:{3}" -f $piece.Id, $piece.X, $piece.Y, ($piece.Rotation % 4)
     }
 
     [Tetromino] GetGhostCached() {
+        # Ghost piece shows where active piece will land if dropped immediately
+        # Caching prevents expensive recalculation when piece hasn't moved
         $active = $this.Ctx.Active
         if (-not $active) { return $null }
 
         $newKey = $this.MakeGhostKey($active)
 
-        # Only recalculate ghost if piece has moved
+        # Only recalculate ghost position when active piece has moved or rotated
         if ($this.GhostKey -ne $newKey) {
             $this.GhostCache = Get-GhostPieceFrom -board $this.Ctx.Board -active $active -ids $this.Ctx.Ids
-            $this.GhostKey = $newKey
+            $this.GhostKey   = $newKey
         }
 
         return $this.GhostCache
+    }
+
+    # Performance monitoring for optimization tuning
+    [hashtable] GetEngineStats() {
+        return @{
+            CollisionCacheSize = $this._CollisionCache.Count
+            LockDelayActive = $this.LockDelayActive
+            LockResets = $this.LockResets
+            CurrentLevel = $this.Ctx.Level
+            GravityInterval = $this.MsPerGravity
+        }
+    }
+
+    # Debug helper for analyzing performance bottlenecks
+    [void] ClearPerformanceCaches() {
+        $this._CollisionCache.Clear()
+        $this.GhostCache = $null
+        $this.GhostKey = ''
     }
 }
