@@ -7,19 +7,13 @@ class UIManager {
         $this.Panels = @()
     }
 
-    [void] AddPanel([Panel]$panel) {
+    [void] AddPanel([object]$panel) {
         $this.Panels.Add($panel)
     }
 
     [void] Render() {
         foreach ($panel in $this.Panels) {
-            if (
-                $panel -is [ScorePanel] -or
-                $panel -is [NextPanel] -or
-                $panel -is [StatsPanel] -or
-                $panel -is [LinesPanel] -or
-                $panel -is [LevelPanel]
-            ) {
+            if ($panel.GetType().Name -in @('ScorePanel', 'NextPanel', 'StatsPanel', 'LinesPanel', 'LevelPanel')) {
                 $panel.Render()
             } else {
                 $panel.DrawFrame()
@@ -129,7 +123,7 @@ class ConsoleRenderer {
         }
     }
 
-    [hashtable] BuildBlockMap([Tetromino] $piece) {
+    [hashtable] BuildBlockMap([object] $piece) {
         # Convert piece blocks to hash table for O(1) lookup instead of O(n) search
         # This optimization is critical during rendering when checking thousands of cells
         if (-not $piece) { return @{} }
@@ -145,7 +139,7 @@ class ConsoleRenderer {
         return $blockMap
     }
 
-    [void] MarkDirtyRows([GameState] $state, [hashtable] $activeBlocks, [hashtable] $ghostBlocks) {
+    [void] MarkDirtyRows([object] $state, [hashtable] $activeBlocks, [hashtable] $ghostBlocks) {
         # Intelligent dirty tracking minimizes unnecessary screen updates
         # This is essential for maintaining smooth gameplay during rapid piece movement
         
@@ -208,7 +202,7 @@ class ConsoleRenderer {
     }
 
     [void] DrawBoard(
-        [GameState]   $state,
+        [object]      $state,
         [string[]]    $ids,
         [hashtable]   $colors,
         [hashtable]   $bgColors,
@@ -299,12 +293,12 @@ class ConsoleRenderer {
         }
     }
 
-    [void] SetupUIPanels([GameState] $state, [hashtable] $colors) {
+    [void] SetupUIPanels([object] $state, [hashtable] $colors) {
         $this.Gap = 1  # Consistent spacing between UI elements
 
         # Stats panel positioned on left side for easy reference
         $statsX     = $this.Gap
-        $statsPanel = [StatsPanel]::new(
+        $statsPanel = New-Object -TypeName StatsPanel -ArgumentList @(
             $statsX,
             0,
             $script:STATS_PANEL_WIDTH,
@@ -319,7 +313,7 @@ class ConsoleRenderer {
         $boardH = $script:BOARD_HEIGHT + 2  # Include frame borders
 
         # Lines counter positioned above game board for visibility
-        $linesPanel = [LinesPanel]::new($boardX, 0, $boardW, 1)
+        $linesPanel = New-Object -TypeName LinesPanel -ArgumentList @($boardX, 0, $boardW, 1)
         $this.UI.AddPanel($linesPanel)
 
         # Store board coordinates for DrawBoard method
@@ -333,14 +327,14 @@ class ConsoleRenderer {
         # Right-side HUD with score, next piece, and level information
         $hudX = $boardX + $boardW + 2 + $this.Gap
 
-        $scorePanel = [ScorePanel]::new(
+        $scorePanel = New-Object -TypeName ScorePanel -ArgumentList @(
             0,
             0,
             $script:SCORE_PANEL_WIDTH,
             $script:SCORE_PANEL_HEIGHT
         )
 
-        $nextPanel = [NextPanel]::new(
+        $nextPanel = New-Object -TypeName NextPanel -ArgumentList @(
             0,
             0,
             $script:NEXT_PANEL_WIDTH,
@@ -348,7 +342,7 @@ class ConsoleRenderer {
             $colors
         )
 
-        $levelPanel = [LevelPanel]::new(
+        $levelPanel = New-Object -TypeName LevelPanel -ArgumentList @(
             0,
             0,
             $script:NEXT_PANEL_WIDTH,
@@ -363,7 +357,7 @@ class ConsoleRenderer {
         $this.UI.AddPanel($levelPanel)
     }
 
-    [void] Draw([GameState] $state, [hashtable] $colors, [hashtable] $bgColors, [string[]] $ids) {
+    [void] Draw([object] $state, [hashtable] $colors, [hashtable] $bgColors, [string[]] $ids) {
         # Lazy initialization ensures UI setup only happens when needed
         if (
             $this.UI.Panels.Count -eq 0 -or
@@ -375,17 +369,17 @@ class ConsoleRenderer {
 
         # Update panel data from current game state
         foreach ($panel in $this.UI.Panels) {
-            if ($panel -is [ScorePanel]) {
+            if ($panel.GetType().Name -eq 'ScorePanel') {
                 $panel.Score = $state.Score
                 $panel.Lines = $state.Lines
                 $panel.Level = $state.Level
-            } elseif ($panel -is [LevelPanel]) {
+            } elseif ($panel.GetType().Name -eq 'LevelPanel') {
                 $panel.Level = $state.Level
-            } elseif ($panel -is [NextPanel]) {
+            } elseif ($panel.GetType().Name -eq 'NextPanel') {
                 $panel.NextId = $state.NextPieceId
-            } elseif ($panel -is [StatsPanel]) {
+            } elseif ($panel.GetType().Name -eq 'StatsPanel') {
                 $panel.Counts = $state.PieceStats
-            } elseif ($panel -is [LinesPanel]) {
+            } elseif ($panel.GetType().Name -eq 'LinesPanel') {
                 $panel.Lines = $state.Lines
             }
         }
@@ -444,7 +438,7 @@ class ConsoleRenderer {
 
     [void] DrawFrame([int]$x, [int]$y, [int]$wChars, [int]$hRows, [string]$title = "") {
         # Delegate frame drawing to Panel class for consistency
-        $panel = [Panel]::new($x, $y, $wChars, $hRows, $title)
+        $panel = New-Object -TypeName Panel -ArgumentList @($x, $y, $wChars, $hRows, $title)
         $panel.DrawFrame()
     }
 
