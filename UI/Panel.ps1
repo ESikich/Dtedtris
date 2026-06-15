@@ -26,12 +26,19 @@ class Panel {
 
         $this.__LastDrawnState["frameKey"] = $frameKey
 
-        $frameTop = "┌" + ("─" * $this.Width) + "┐"
+        $topLeft = [char]0x250C
+        $topRight = [char]0x2510
+        $bottomLeft = [char]0x2514
+        $bottomRight = [char]0x2518
+        $horizontal = [char]0x2500
+        $vertical = [char]0x2502
+
+        $frameTop = "$topLeft" + ("$horizontal" * $this.Width) + "$topRight"
 
         if ($this.Title) {
             $titleString = " $($this.Title) "
             $mid = [math]::Floor(($this.Width - $titleString.Length) / 2)
-            $frameTop = "┌" + ("─" * $mid) + $titleString + ("─" * ($this.Width - $mid - $titleString.Length)) + "┐"
+            $frameTop = "$topLeft" + ("$horizontal" * $mid) + $titleString + ("$horizontal" * ($this.Width - $mid - $titleString.Length)) + "$topRight"
         }
 
         Write-CursorPositionIfChanged $this.X $this.Y
@@ -39,13 +46,13 @@ class Panel {
 
         for ($row = 0; $row -lt $this.Height; $row++) {
             Write-CursorPositionIfChanged $this.X ($this.Y + 1 + $row)
-            [Console]::Write("│")
+            [Console]::Write("$vertical")
             Write-CursorPositionIfChanged ($this.X + $this.Width + 1) ($this.Y + 1 + $row)
-            [Console]::Write("│")
+            [Console]::Write("$vertical")
         }
 
         Write-CursorPositionIfChanged $this.X ($this.Y + $this.Height + 1)
-        [Console]::Write("└" + ("─" * $this.Width) + "┘")
+        [Console]::Write("$bottomLeft" + ("$horizontal" * $this.Width) + "$bottomRight")
     }
 
     static [hashtable] GetMinMax([Point[]]$arr) {

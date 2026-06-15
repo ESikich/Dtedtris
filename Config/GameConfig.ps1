@@ -25,8 +25,8 @@ $script:LOCK_RESET_LIMIT = 2    # How many times movement can reset the delay
 $script:TETROMINO_IDS = @('T', 'L', 'Z', 'O', 'S', 'J', 'I')
 
 # === RENDERING CHARACTERS ===
-$script:CHAR_SOLID = '▓'
-$script:CHAR_GHOST = '░'
+$script:CHAR_SOLID = [char]0x2593
+$script:CHAR_GHOST = [char]0x2591
 $script:CHAR_EMPTY = ' '
 
 # === UI DIMENSIONS ===

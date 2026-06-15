@@ -154,7 +154,8 @@ class NextPanel : Panel {
         }
 
         $esc = [char]27
-        $ansiBlock = "$esc[38;2;$($rgb[0]);$($rgb[1]);$($rgb[2])m██$esc[0m"
+        $solidChars = [string]::new([char]$script:CHAR_SOLID, [int]$cellWidth)
+        $ansiBlock = "$esc[38;2;$($rgb[0]);$($rgb[1]);$($rgb[2])m$solidChars$esc[0m"
         $blank = ' ' * $cellWidth
 
         for ($row = 0; $row -lt $this.Height; $row++) {
@@ -212,6 +213,7 @@ class StatsPanel : Panel {
                 $color = $script:colors[$id]
                 $rgb   = "$esc[38;2;$($color[0]);$($color[1]);$($color[2])m"
                 $reset = "$esc[0m"
+                $solidChars = [string]::new([char]$script:CHAR_SOLID, [int]$script:RENDER_CELL_WIDTH)
 
                 $mm = [Panel]::GetMinMax($blocks)
                 $minX = $mm.MinX; $minY = $mm.MinY
@@ -231,7 +233,7 @@ class StatsPanel : Panel {
                     for ($dx = 0; $dx -lt 4; $dx++) {
                         $key = "{$dx}:{$dy}"
                         if ($occupied.ContainsKey($key)) {
-                            $null = $this._LineBuilder.Append("$rgb▓▓$reset")
+                            $null = $this._LineBuilder.Append("$rgb$solidChars$reset")
                         } else {
                             $null = $this._LineBuilder.Append("  ")
                         }

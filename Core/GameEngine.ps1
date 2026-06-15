@@ -101,8 +101,16 @@ class GameEngine {
         # Efficient ghost piece calculation with caching
         $ghost = $this.GetGhostCached()
 
-        # Generate hash to detect state changes and avoid unnecessary snapshots
-        $stateHash = "$($this.Ctx.Score):$($this.Ctx.Lines):$($this.Ctx.Level):$($this.Ctx.Active.X):$($this.Ctx.Active.Y):$($this.Ctx.Active.Rotation)".GetHashCode()
+        # Generate hash to detect state changes and avoid unnecessary snapshots.
+        # Include board rows and piece id so locks/spawns cannot be mistaken for
+        # an unchanged frame when the new piece has the same coordinates.
+        $activeKey = if ($this.Ctx.Active) {
+            "$($this.Ctx.Active.Id):$($this.Ctx.Active.X):$($this.Ctx.Active.Y):$($this.Ctx.Active.Rotation)"
+        } else {
+            ''
+        }
+        $boardKey = [string]::Join(',', $this.Ctx.Board.Rows)
+        $stateHash = "$($this.Ctx.Score):$($this.Ctx.Lines):$($this.Ctx.Level):$($activeKey):$($next):$($boardKey)".GetHashCode()
         
         # Return cached snapshot if nothing meaningful has changed
         if ($stateHash -eq $this._LastSnapshotHash -and -not $this.Ctx.GameOver) {

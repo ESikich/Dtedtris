@@ -25,7 +25,7 @@ _|_|_|        _|_|    _|_|_|    _|_|_|      _|_|  _|        _|  _|_|_|
 '@
 $p='Press [Enter] to start'
 $c=[char[]]" `'.,-~:;=!*#%$@&8BWM"
-$k=@('Yellow','White','Magenta','Cyan','Gray') # ← sparkles!
+$k=@('Yellow','White','Magenta','Cyan','Gray') # sparkles
 $w=[console]::WindowWidth
 $h=[console]::WindowHeight
 if([console]::BufferWidth -lt $w -or [console]::BufferHeight -lt $h){[console]::SetBufferSize([math]::Max($w,[console]::BufferWidth),[math]::Max($h,[console]::BufferHeight))}

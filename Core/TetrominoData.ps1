@@ -28,7 +28,7 @@ function Convert-BitsToPoint([int]$bits) {
 function Expand-Mask16ToArray([int]$mask16) {
     # Convert 16-bit mask to 4-element array representing rows
     function ReverseNibble([int]$n) {
-        # Reverse bit order: b3 b2 b1 b0 → b0 b1 b2 b3
+        # Reverse bit order: b3 b2 b1 b0 -> b0 b1 b2 b3
         return  (
             (( $n             -band 1) * 8) +   # bit0 -> bit3
             ((($n -shr 1)     -band 1) * 4) +   # bit1 -> bit2

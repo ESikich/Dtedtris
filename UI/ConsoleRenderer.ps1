@@ -56,6 +56,9 @@ class ConsoleRenderer {
     hidden [string[]] $_PreAllocatedSpaces
     hidden [int] $_LastActiveHash = 0
     hidden [int] $_LastGhostHash = 0
+    hidden [int[]] $_LastBoardRows
+    hidden [hashtable] $_PreviousActiveBlocks = @{}
+    hidden [hashtable] $_PreviousGhostBlocks = @{}
 
     ConsoleRenderer([int]$width, [int]$height, [hashtable]$colors) {
         $this.Width = $width
@@ -87,6 +90,10 @@ class ConsoleRenderer {
         
         # Dirty row tracking enables selective rendering for better frame rates
         $this._DirtyRows = [bool[]]::new($this.Height)
+        $this._LastBoardRows = [int[]]::new($this.Height)
+        for ($i = 0; $i -lt $this.Height; $i++) {
+            $this._LastBoardRows[$i] = -1
+        }
         
         # Pre-allocate common space strings to avoid runtime allocation overhead
         $this._PreAllocatedSpaces = [string[]]::new(21)
@@ -98,11 +105,13 @@ class ConsoleRenderer {
     [void] BuildOptimizedAnsiCache() {
         $this.AnsiCache = @{}
         $esc = [char]27
+        $solidChars = [string]::new([char]$script:CHAR_SOLID, [int]$script:RENDER_CELL_WIDTH)
+        $ghostChars = [string]::new([char]$script:CHAR_GHOST, [int]$script:RENDER_CELL_WIDTH)
 
         # Enhanced ANSI cache with pre-computed strings reduces string concatenation overhead
         $this.AnsiCache['Fallback'] = @{ 
-            solid = "$esc[37m██$esc[0m"
-            ghost = "$esc[37m░░$esc[0m" 
+            solid = "$esc[37m$solidChars$esc[0m"
+            ghost = "$esc[37m$ghostChars$esc[0m" 
         }
 
         foreach ($id in $this.Colors.Keys) {
@@ -113,8 +122,8 @@ class ConsoleRenderer {
             $fg  = "$esc[38;2;$($rgb[0]);$($rgb[1]);$($rgb[2])m"
             $bgc = "$esc[48;2;$($bg[0]);$($bg[1]);$($bg[2])m"
 
-            $solid = "$fg$bgc$($script:CHAR_SOLID * $script:RENDER_CELL_WIDTH)$esc[0m"
-            $ghost = "$fg$($script:CHAR_GHOST * $script:RENDER_CELL_WIDTH)$esc[0m"
+            $solid = "$fg$bgc$solidChars$esc[0m"
+            $ghost = "$fg$ghostChars$esc[0m"
 
             $this.AnsiCache[$id] = @{ solid = $solid; ghost = $ghost }
         }
@@ -149,11 +158,20 @@ class ConsoleRenderer {
             "$($state.GhostPiece.Id):$($state.GhostPiece.X):$($state.GhostPiece.Y):$($state.GhostPiece.Rotation)".GetHashCode()
         } else { 0 }
         
-        # Only mark rows dirty if pieces have actually moved
+        # Redraw rows whose settled-board occupancy changed.
+        for ($y = 0; $y -lt $this.Height; $y++) {
+            if ($this._LastBoardRows[$y] -ne $state.Rows[$y]) {
+                $this._DirtyRows[$y] = $true
+                $this._LastBoardRows[$y] = $state.Rows[$y]
+            }
+        }
+
+        # Only mark moving-piece rows dirty if pieces have actually moved.
         $piecesChanged = ($activeHash -ne $this._LastActiveHash) -or ($ghostHash -ne $this._LastGhostHash)
         
         if ($piecesChanged) {
-            # Mark affected rows for redraw when pieces move
+            # Mark current and previous moving-piece rows. This clears old cells
+            # without repainting the entire playfield on every movement frame.
             foreach ($idx in $activeBlocks.Keys) {
                 $y = [math]::Floor($idx / $this.Width)
                 if ($y -ge 0 -and $y -lt $this.Height) {
@@ -167,12 +185,17 @@ class ConsoleRenderer {
                     $this._DirtyRows[$y] = $true
                 }
             }
-            
-            # Mark previous positions dirty to clear old piece graphics
-            if ($this._LastActiveHash -ne 0 -or $this._LastGhostHash -ne 0) {
-                # For safety, mark a reasonable range around piece movement
-                # This ensures clean erasing of previous piece positions
-                for ($y = 0; $y -lt $this.Height; $y++) {
+
+            foreach ($idx in $this._PreviousActiveBlocks.Keys) {
+                $y = [math]::Floor($idx / $this.Width)
+                if ($y -ge 0 -and $y -lt $this.Height) {
+                    $this._DirtyRows[$y] = $true
+                }
+            }
+
+            foreach ($idx in $this._PreviousGhostBlocks.Keys) {
+                $y = [math]::Floor($idx / $this.Width)
+                if ($y -ge 0 -and $y -lt $this.Height) {
                     $this._DirtyRows[$y] = $true
                 }
             }
@@ -180,6 +203,8 @@ class ConsoleRenderer {
         
         $this._LastActiveHash = $activeHash
         $this._LastGhostHash = $ghostHash
+        $this._PreviousActiveBlocks = $activeBlocks.Clone()
+        $this._PreviousGhostBlocks = $ghostBlocks.Clone()
     }
 
     [void] DrawBoard(
